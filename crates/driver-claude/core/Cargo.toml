@@ -1,0 +1,27 @@
+[package]
+name = "led-driver-claude-core"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Sync core of the Claude driver — portable, no I/O, no async.
+#
+# Stage-by-stage scope:
+#
+# - `parser` — pure stream-json decoder. Maps one line from
+#   `claude -p --output-format stream-json --verbose` to a typed
+#   `ParsedStdout`. Tolerant of unknown fields (the CLI's init
+#   payload keeps growing) but strict about the shapes led actually
+#   reads. Driver-claude's native worker pipes stdout through this
+#   per line; the runtime never touches raw JSON.
+#
+# Later stages add `ChatLifecycle` + `ChatTranscripts` (external-fact
+# sources), the `ClaudeCmd` / `ClaudeEvent` ABI, and the sync driver's
+# `process` / `execute` methods. Per EXAMPLE-ARCH §Drivers, each
+# layer is independently unit-testable without spawning a subprocess.
+
+[dependencies]
+led-core = { workspace = true }
+imbl = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

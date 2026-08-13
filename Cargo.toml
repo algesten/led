@@ -25,6 +25,7 @@ members = [
     "crates/state-lifecycle",
     "crates/state-kbd-macro",
     "crates/state-text-input",
+    "crates/state-chat",
     "crates/driver-buffers/core",
     "crates/driver-buffers/native",
     "crates/driver-terminal/core",
@@ -47,6 +48,8 @@ members = [
     "crates/driver-session/native",
     "crates/driver-file-watch/core",
     "crates/driver-file-watch/native",
+    "crates/driver-claude/core",
+    "crates/driver-claude/native",
     "crates/runtime",
     "crates/text-layout",
     "crates/text-reflow",
@@ -81,6 +84,7 @@ led-state-git = { path = "crates/state-git" }
 led-state-lifecycle = { path = "crates/state-lifecycle" }
 led-state-kbd-macro = { path = "crates/state-kbd-macro" }
 led-state-text-input = { path = "crates/state-text-input" }
+led-state-chat = { path = "crates/state-chat" }
 led-driver-buffers-core = { path = "crates/driver-buffers/core" }
 led-driver-buffers-native = { path = "crates/driver-buffers/native" }
 led-driver-terminal-core = { path = "crates/driver-terminal/core" }
@@ -103,6 +107,8 @@ led-driver-session-core = { path = "crates/driver-session/core" }
 led-driver-session-native = { path = "crates/driver-session/native" }
 led-driver-file-watch-core = { path = "crates/driver-file-watch/core" }
 led-driver-file-watch-native = { path = "crates/driver-file-watch/native" }
+led-driver-claude-core = { path = "crates/driver-claude/core" }
+led-driver-claude-native = { path = "crates/driver-claude/native" }
 led-runtime = { path = "crates/runtime" }
 led-text-layout = { path = "crates/text-layout" }
 led-text-reflow = { path = "crates/text-reflow" }

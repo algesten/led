@@ -13,6 +13,7 @@
 
 pub mod actions;
 pub mod browser;
+pub mod claude;
 pub mod desired;
 pub mod inputs;
 pub mod issues;
@@ -27,6 +28,11 @@ pub use browser::{
     browser_auto_expanded, browser_entries, browser_selected_idx, desired_preview_intent,
     diag_categories_map, file_categories_map, file_list_action, git_categories_map,
     BrowserDerivedInputs, PreviewIntent,
+};
+pub use claude::{
+    chat_picker_items, chat_tab_view, context_pct, needs_auto_label,
+    orphan_status_actions, pending_chat_splices, pending_persist_writes, subprocess_action,
+    ChatSplice, ChatViewMessage, ChatViewModel, PickerItem, AUTO_LABEL_MIN_ROUNDS,
 };
 pub use desired::{
     compiled_query, completion_commit_plan, completion_refilter_outcome,

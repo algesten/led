@@ -1024,6 +1024,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "led-driver-claude-core"
+version = "0.0.0"
+dependencies = [
+ "imbl",
+ "led-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "led-driver-claude-native"
+version = "0.0.0"
+dependencies = [
+ "led-core",
+ "led-driver-claude-core",
+ "libc",
+ "serde_json",
+]
+
+[[package]]
 name = "led-driver-clipboard-core"
 version = "0.0.0"
 dependencies = [
@@ -1254,6 +1274,8 @@ dependencies = [
  "led-core",
  "led-driver-buffers-core",
  "led-driver-buffers-native",
+ "led-driver-claude-core",
+ "led-driver-claude-native",
  "led-driver-clipboard-core",
  "led-driver-clipboard-native",
  "led-driver-file-search-core",
@@ -1277,6 +1299,7 @@ dependencies = [
  "led-state-alerts",
  "led-state-browser",
  "led-state-buffer-edits",
+ "led-state-chat",
  "led-state-clipboard",
  "led-state-completions",
  "led-state-diagnostics",
@@ -1329,6 +1352,14 @@ dependencies = [
  "rmp-serde",
  "ropey",
  "serde",
+]
+
+[[package]]
+name = "led-state-chat"
+version = "0.0.0"
+dependencies = [
+ "imbl",
+ "led-core",
 ]
 
 [[package]]

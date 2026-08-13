@@ -23,11 +23,16 @@ use led_driver_session_core::{
 };
 use rusqlite::Connection;
 
+mod chat;
 mod save_load;
 mod schema;
 mod sync;
 mod undo;
 
+use chat::{
+    append_chat_message, insert_chat_row, load_chats, update_chat_labels,
+    update_chat_last_active, update_chat_status,
+};
 use save_load::{load_session, save_session};
 use schema::run_schema;
 use sync::check_sync;
@@ -79,11 +84,26 @@ fn worker_loop(rx: Receiver<SessionCmd>, tx: Sender<SessionEvent>, notify: Notif
                 match init_workspace(&root, &config_dir) {
                     Ok((ws, restored)) => {
                         let primary = ws.primary;
+                        // Also bulk-load chats for this
+                        // workspace; emitted as a separate
+                        // event so existing Restored consumers
+                        // don't change shape.
+                        let chats = load_chats(&ws.conn, &ws.root_path);
                         workspace = Some(ws);
                         let _ = tx.send(SessionEvent::Restored {
                             primary,
                             restored,
                         });
+                        match chats {
+                            Ok((rows, messages)) => {
+                                let _ = tx.send(SessionEvent::ChatsLoaded { rows, messages });
+                            }
+                            Err(e) => {
+                                let _ = tx.send(SessionEvent::Failed {
+                                    message: format!("load_chats: {e}"),
+                                });
+                            }
+                        }
                     }
                     Err(msg) => {
                         let _ = tx.send(SessionEvent::Failed { message: msg });
@@ -216,6 +236,95 @@ fn worker_loop(rx: Receiver<SessionCmd>, tx: Sender<SessionEvent>, notify: Notif
             SessionCmd::Shutdown => {
                 drop(workspace.take());
                 return;
+            }
+
+            // ── Chat persistence ───────────────────────────────
+            //
+            // Write-through: no ack event on success; errors
+            // propagate via SessionEvent::Failed.
+            SessionCmd::InsertChatRow { row } => {
+                let Some(ws) = workspace.as_ref() else {
+                    continue;
+                };
+                if !ws.primary {
+                    continue;
+                }
+                if let Err(e) = insert_chat_row(&ws.conn, &row) {
+                    let _ = tx.send(SessionEvent::Failed {
+                        message: format!("insert_chat_row: {e}"),
+                    });
+                    notify.notify();
+                }
+            }
+            SessionCmd::AppendChatMessage { message } => {
+                let Some(ws) = workspace.as_ref() else {
+                    continue;
+                };
+                if !ws.primary {
+                    continue;
+                }
+                if let Err(e) = append_chat_message(&ws.conn, &message) {
+                    let _ = tx.send(SessionEvent::Failed {
+                        message: format!("append_chat_message: {e}"),
+                    });
+                    notify.notify();
+                }
+            }
+            SessionCmd::UpdateChatLabels {
+                id,
+                short_label,
+                long_summary,
+            } => {
+                let Some(ws) = workspace.as_ref() else {
+                    continue;
+                };
+                if !ws.primary {
+                    continue;
+                }
+                if let Err(e) = update_chat_labels(
+                    &ws.conn,
+                    &id,
+                    short_label.as_deref(),
+                    long_summary.as_deref(),
+                ) {
+                    let _ = tx.send(SessionEvent::Failed {
+                        message: format!("update_chat_labels: {e}"),
+                    });
+                    notify.notify();
+                }
+            }
+            SessionCmd::UpdateChatLastActive {
+                id,
+                at,
+                usage_json,
+            } => {
+                let Some(ws) = workspace.as_ref() else {
+                    continue;
+                };
+                if !ws.primary {
+                    continue;
+                }
+                if let Err(e) = update_chat_last_active(&ws.conn, &id, at, usage_json.as_deref())
+                {
+                    let _ = tx.send(SessionEvent::Failed {
+                        message: format!("update_chat_last_active: {e}"),
+                    });
+                    notify.notify();
+                }
+            }
+            SessionCmd::UpdateChatStatus { id, status } => {
+                let Some(ws) = workspace.as_ref() else {
+                    continue;
+                };
+                if !ws.primary {
+                    continue;
+                }
+                if let Err(e) = update_chat_status(&ws.conn, &id, status) {
+                    let _ = tx.send(SessionEvent::Failed {
+                        message: format!("update_chat_status: {e}"),
+                    });
+                    notify.notify();
+                }
             }
         }
     }
@@ -350,9 +459,14 @@ mod tests {
     ) -> Option<SessionEvent> {
         let start = Instant::now();
         while start.elapsed() < deadline {
-            let mut batch = drv.process(state);
-            if let Some(ev) = batch.pop() {
-                return Some(ev);
+            // Init emits Restored + ChatsLoaded in sequence;
+            // these tests cover the non-chat surface so we
+            // filter ChatsLoaded out here. The chat module has
+            // its own SQL-level tests.
+            for ev in drv.process(state) {
+                if !matches!(ev, SessionEvent::ChatsLoaded { .. }) {
+                    return Some(ev);
+                }
             }
             std::thread::sleep(Duration::from_millis(5));
         }

@@ -108,6 +108,34 @@ pub enum Command {
     /// reserved for `InsertTab` (M23).
     FindFileTabComplete,
 
+    /// Open the "Find chat:" picker (Claude chat sessions).
+    /// Bound to `C-x C-r` by default. Lists existing sessions
+    /// for the current workspace (sorted by last-active DESC);
+    /// an unmatched name mints a new chat tab. Picker dispatch
+    /// and render land in a later stage; the binding lives now
+    /// so the keymap is locked-in early.
+    FindChat,
+    /// Mint a fresh chat session + open it as a new tab. Bound
+    /// to `C-x C-t` by default. Goes straight through the
+    /// dispatch flow without showing a picker.
+    NewChat,
+    /// Legacy stub — used to switch focus between the chat
+    /// transcript and the composer when those were separate
+    /// regions. With chats now living as regular `EditedBuffer`s
+    /// the composer is the buffer, so this is a no-op kept for
+    /// future split-pane experimentation.
+    ChatToggleFocus,
+    /// Legacy stub — pair of [`ChatSubmit`] kept for backwards
+    /// compatibility with older keymaps that bound it. Routes
+    /// through the same code path as `ChatSubmit` at the
+    /// dispatch boundary.
+    ChatSend,
+    /// Submit the user-typed text in the active chat buffer
+    /// (everything from `submit_offset` to end-of-rope) as a
+    /// new user message. Default binding: `Alt+Enter` while a
+    /// chat tab is focused.
+    ChatSubmit,
+
     // In-buffer incremental search (M13). `InBufferSearch` both
     // starts a fresh isearch and advances to the next match when
     // already active — see `docs/spec/search.md`.

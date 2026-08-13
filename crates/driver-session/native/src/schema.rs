@@ -68,6 +68,41 @@ pub(crate) fn run_schema(conn: &Connection) -> rusqlite::Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_undo_entries_file
             ON undo_entries(root_path, file_path, seq);
+
+        -- ── Claude chat persistence ─────────────────────────────
+        --
+        -- Pure additions — no version bump needed because every
+        -- statement here is `IF NOT EXISTS`, so existing v3
+        -- databases get the tables created on next startup
+        -- without losing user data.
+
+        CREATE TABLE IF NOT EXISTS claude_sessions (
+            id              TEXT PRIMARY KEY,
+            workspace_root  TEXT NOT NULL REFERENCES workspaces(root_path) ON DELETE CASCADE,
+            short_label     TEXT,
+            long_summary    TEXT,
+            model           TEXT,
+            effort          TEXT,
+            permission_mode TEXT,
+            created_at      INTEGER NOT NULL,
+            last_active_at  INTEGER NOT NULL,
+            last_usage_json TEXT,
+            status          TEXT NOT NULL DEFAULT 'active'
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_claude_sessions_workspace
+            ON claude_sessions(workspace_root, last_active_at DESC);
+
+        CREATE TABLE IF NOT EXISTS claude_messages (
+            session_id  TEXT NOT NULL REFERENCES claude_sessions(id) ON DELETE CASCADE,
+            seq         INTEGER NOT NULL,
+            role        TEXT NOT NULL,
+            kind        TEXT NOT NULL,
+            body_json   TEXT NOT NULL,
+            usage_json  TEXT,
+            created_at  INTEGER NOT NULL,
+            PRIMARY KEY (session_id, seq)
+        );
         ",
     )?;
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)

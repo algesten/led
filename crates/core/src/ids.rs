@@ -187,6 +187,16 @@ string_newtype!(ChainId);
 
 string_newtype!(ServerId);
 
+// ---- Claude session UUID -------------------------------------------
+//
+// UUIDv4 string led mints for each Claude chat session. Passed to
+// `claude -p --session-id <uuid>` on first spawn and to
+// `--resume <uuid>` on subsequent spawns. The CLI persists its own
+// transcript under `~/.claude/projects/` keyed by this id; led
+// stores the same id as `claude_sessions.id` in its own SQLite.
+
+string_newtype!(SessionUuid);
+
 #[cfg(test)]
 mod tests {
     id_newtype!(TestId);

@@ -63,6 +63,8 @@ pub(crate) fn dispatch_input<W: Write>(
         lsp_extras,
         lsp_pending,
         git,
+        chat_sessions,
+        chat_prefs,
         lifecycle,
         clock,
         ..
@@ -101,6 +103,8 @@ pub(crate) fn dispatch_input<W: Write>(
             keymap: env.keymap,
             chord,
             kbd_macro,
+            chat_sessions,
+            chat_prefs,
             syntax,
             clock,
         };
@@ -144,6 +148,7 @@ pub(crate) fn cleanup_orphans(sources: &mut Sources) {
         lsp_notified,
         path_chains,
         lsp_pending,
+        chat_sessions,
         ..
     } = sources;
 
@@ -161,6 +166,7 @@ pub(crate) fn cleanup_orphans(sources: &mut Sources) {
     lsp_pending
         .inlay_hints_by_path
         .retain(|p, _| open_paths.contains(p));
+    chat_sessions.by_path.retain(|p, _| open_paths.contains(p));
 }
 
 /// M21 quit gate. Returns `true` when the outer loop should break.

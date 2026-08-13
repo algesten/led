@@ -1,0 +1,21 @@
+[package]
+name = "led-driver-claude-native"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Desktop-native async half of the Claude driver.
+#
+# Spawns `claude -p` subprocesses (one per chat session) and
+# pumps NDJSON in / out via std::thread + std::sync::mpsc. No
+# tokio per feedback_no_tokio_for_drivers — every per-subprocess
+# thread group (reader, writer, stderr, waiter) is a plain
+# std::thread::spawn.
+
+[dependencies]
+led-core = { workspace = true }
+led-driver-claude-core = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
