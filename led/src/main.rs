@@ -43,11 +43,10 @@ struct Cli {
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
-    // Load keymap before raw mode so parse errors and per-binding
-    // warnings land on a cooked terminal where the user can read
-    // them. Per-binding problems are non-fatal — they surface as
-    // warnings and that entry is skipped. Fatal (I/O, malformed
-    // TOML) exits with code 2.
+    // Load keymap before raw mode so fatal parse errors land on a
+    // cooked terminal where the user can read them. Per-binding
+    // problems are non-fatal and silently skipped. Fatal (I/O,
+    // malformed TOML) errors exit with code 2.
     let loaded = match load_keymap(cli.config_dir.as_deref()) {
         Ok(l) => l,
         Err(e) => {
@@ -55,13 +54,10 @@ fn main() -> io::Result<()> {
             std::process::exit(2);
         }
     };
-    for w in &loaded.warnings {
-        eprintln!("led: config warning: {w}");
-    }
     let keymap = loaded.keymap;
 
-    // Theme resolves the same way: fatal on I/O or malformed TOML,
-    // non-fatal warnings for per-region schema problems. Always
+    // Theme resolves the same way: fatal on I/O or malformed TOML;
+    // per-region schema problems are silently skipped. Always
     // discovered from `<config_dir>/theme.toml` (no explicit-path
     // override) — `--config-dir` is the only way to point led at a
     // non-default theme.
@@ -72,9 +68,6 @@ fn main() -> io::Result<()> {
             std::process::exit(2);
         }
     };
-    for w in &loaded_theme.warnings {
-        eprintln!("led: theme warning: {w}");
-    }
     let theme = loaded_theme.theme;
 
     let trace = match cli.golden_trace {
