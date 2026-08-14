@@ -51,6 +51,7 @@ fn indents_src(lang: Language) -> Option<&'static str> {
         Language::Swift => include_str!("../queries/swift/indents.scm"),
         // No indents.scm shipped for these languages.
         Language::Markdown
+        | Language::Yaml
         | Language::Cpp
         | Language::Ruby
         | Language::Make => return None,
@@ -121,6 +122,7 @@ pub(crate) fn ts_language(lang: Language) -> Option<tree_sitter::Language> {
         Language::C => tree_sitter_c::LANGUAGE.into(),
         Language::Swift => tree_sitter_swift::LANGUAGE.into(),
         Language::Markdown
+        | Language::Yaml
         | Language::Cpp
         | Language::Ruby
         | Language::Make => return None,
@@ -157,7 +159,9 @@ fn config_for(lang: Language, ts_lang: &tree_sitter::Language) -> Option<&'stati
         Language::Toml => slot!(),
         Language::C => slot!(),
         Language::Swift => slot!(),
-        Language::Markdown | Language::Cpp | Language::Ruby | Language::Make => return None,
+        Language::Markdown | Language::Yaml | Language::Cpp | Language::Ruby | Language::Make => {
+            return None;
+        }
     };
     let cfg = slot.get_or_init(|| {
         let src = indents_src(lang)

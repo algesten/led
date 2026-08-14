@@ -445,6 +445,12 @@ fn grammars_for(lang: Language) -> Vec<(tree_sitter::Language, &'static Query)> 
             let q = Q.get_or_init(|| compile(l.clone(), tree_sitter_toml_ng::HIGHLIGHTS_QUERY, "toml"));
             vec![(l, q)]
         }
+        Language::Yaml => {
+            static Q: OnceLock<Query> = OnceLock::new();
+            let l: tree_sitter::Language = tree_sitter_yaml::LANGUAGE.into();
+            let q = Q.get_or_init(|| compile(l.clone(), tree_sitter_yaml::HIGHLIGHTS_QUERY, "yaml"));
+            vec![(l, q)]
+        }
         Language::C => {
             static Q: OnceLock<Query> = OnceLock::new();
             let l: tree_sitter::Language = tree_sitter_c::LANGUAGE.into();
@@ -541,6 +547,34 @@ mod tests {
         assert!(
             kinds.contains(&TokenKind::Function),
             "expected a Function token; got {kinds:?}",
+        );
+    }
+
+    #[test]
+    fn yaml_parse_yields_property_and_string_tokens() {
+        let (drv, _native) = spawn(Arc::new(NoopTrace), Notifier::noop());
+        let rope = Arc::new(Rope::from_str("service:\n  image: 'example:latest'\n"));
+        let path = canon_of("compose.yaml");
+
+        drv.execute(std::iter::once(&SyntaxCmd {
+            path,
+            version: led_core::BufferVersion(1),
+            rope,
+            language: Language::Yaml,
+            prev_tree: None,
+            prev_rope: None,
+        }));
+
+        let out = wait_for_out(&drv, Duration::from_secs(5)).expect("parse within 5s");
+        assert_eq!(out.language, Language::Yaml);
+        let kinds: Vec<TokenKind> = out.tokens.iter().map(|t| t.kind).collect();
+        assert!(
+            kinds.contains(&TokenKind::Property),
+            "expected a Property token; got {kinds:?}",
+        );
+        assert!(
+            kinds.contains(&TokenKind::String),
+            "expected a String token; got {kinds:?}",
         );
     }
 

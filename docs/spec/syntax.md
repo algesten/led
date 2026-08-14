@@ -24,7 +24,7 @@ Language detection runs in two layers with modeline priority:
    the first `(extension | well-known filename)` match. Extensions
    recognized today are `rs`, `ts`, `tsx`, `js`, `jsx`, `mjs`, `py`, `c`,
    `h`, `cpp`, `hpp`, `cc`, `cxx`, `hxx`, `swift`, `toml`, `json`, `sh`,
-   `bash`, `rb`, `md`, `markdown`, `mk`. Well-known filenames include
+   `bash`, `rb`, `md`, `markdown`, `yaml`, `yml`, `mk`. Well-known filenames include
    `Makefile`, `Gemfile`, `Rakefile`, `.profile`, `.bashrc`, `Pipfile`,
    `.babelrc`, `SConstruct`, `Snakefile`, etc. (the full table is in
    `crates/core/src/language.rs::filename_to_extension`). The chain

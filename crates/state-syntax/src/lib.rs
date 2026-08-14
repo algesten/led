@@ -43,6 +43,7 @@ pub enum Language {
     Markdown,
     Json,
     Toml,
+    Yaml,
     C,
     Cpp,
     Ruby,
@@ -93,6 +94,7 @@ impl Language {
             "md" | "markdown" => Self::Markdown,
             "json" => Self::Json,
             "toml" => Self::Toml,
+            "yaml" | "yml" => Self::Yaml,
             "c" | "h" => Self::C,
             "cpp" | "cc" | "cxx" | "hpp" | "hh" => Self::Cpp,
             "rb" => Self::Ruby,
@@ -539,6 +541,8 @@ mod tests {
             Some(Language::Python)
         );
         assert_eq!(Language::from_path(&canon("setup.toml")), Some(Language::Toml));
+        assert_eq!(Language::from_path(&canon("config.yaml")), Some(Language::Yaml));
+        assert_eq!(Language::from_path(&canon("compose.yml")), Some(Language::Yaml));
         assert_eq!(Language::from_path(&canon("README.md")), Some(Language::Markdown));
     }
 

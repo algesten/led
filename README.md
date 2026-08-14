@@ -105,6 +105,7 @@ The following mode strings are recognized in modelines:
 | `tsx`              | TSX        |
 | `json`             | JSON       |
 | `toml`             | TOML       |
+| `yaml`, `yml`      | YAML       |
 | `markdown`, `md`   | Markdown   |
 | `bash`, `sh`       | Bash       |
 | `c`                | C          |

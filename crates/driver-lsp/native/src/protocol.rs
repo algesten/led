@@ -92,6 +92,7 @@ pub fn language_id(lang: led_state_syntax::Language) -> &'static str {
         Markdown => "markdown",
         Json => "json",
         Toml => "toml",
+        Yaml => "yaml",
         C => "c",
         Cpp => "cpp",
         Ruby => "ruby",
