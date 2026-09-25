@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::process::Command;
 
 use led_core::ServerId;
 use led_driver_lsp_core::{
@@ -40,6 +41,36 @@ impl Manager {
         // which editor ran the workspace.
         let name = config.command.to_string();
         let args: Vec<&str> = config.args.to_vec();
+        if language == Language::Rust && config.command == "rust-analyzer" {
+            let result = ensure_rust_analyzer_available(config.command, "rustup", || {
+                let _ = self.lsp_event_tx.send(LspEvent::Progress {
+                    server: ServerId::new(name.clone()),
+                    busy: true,
+                    detail: Some("Installing rust-analyzer".into()),
+                });
+                self.notify.notify();
+            });
+            match result {
+                Ok(true) => {
+                    let _ = self.lsp_event_tx.send(LspEvent::Progress {
+                        server: ServerId::new(name.clone()),
+                        busy: false,
+                        detail: None,
+                    });
+                    self.notify.notify();
+                }
+                Ok(false) => {}
+                Err(message) => {
+                    let _ = self.lsp_event_tx.send(LspEvent::Error {
+                        server: ServerId::new(name),
+                        message,
+                    });
+                    self.notify.notify();
+                    self.skipped_languages.insert(language);
+                    return;
+                }
+            }
+        }
         let server = match crate::subprocess::spawn(
             name.clone(),
             config.command,
@@ -209,5 +240,165 @@ impl Manager {
                 .lsp_send_notification(&server_name, "exit", None, None);
         }
         self.servers.clear();
+    }
+}
+
+/// A rustup proxy exists on PATH even when its component is missing.
+/// Probe that proxy before opening the LSP stream, install only for
+/// rustup's specific missing-component diagnostic, then verify the
+/// installed binary actually runs. Returns true when it installed.
+fn ensure_rust_analyzer_available(
+    analyzer: &str,
+    rustup: &str,
+    on_install: impl FnOnce(),
+) -> Result<bool, String> {
+    let probe = Command::new(analyzer)
+        .arg("--version")
+        .output()
+        .map_err(|e| format!("cannot run rust-analyzer: {e}"))?;
+    if probe.status.success() {
+        return Ok(false);
+    }
+    let stderr = String::from_utf8_lossy(&probe.stderr);
+    let missing_component = stderr.contains("Unknown binary 'rust-analyzer'")
+        || stderr.contains("'rust-analyzer' is not installed for the toolchain");
+    if !missing_component {
+        return Err(format!(
+            "rust-analyzer --version failed: {}",
+            error_detail(&probe)
+        ));
+    }
+
+    on_install();
+    let install = Command::new(rustup)
+        .args(["component", "add", "rust-analyzer"])
+        .output()
+        .map_err(|e| format!("cannot install rust-analyzer with rustup: {e}"))?;
+    if !install.status.success() {
+        return Err(format!(
+            "rustup component add rust-analyzer failed: {}",
+            error_detail(&install)
+        ));
+    }
+    let verify = Command::new(analyzer)
+        .arg("--version")
+        .output()
+        .map_err(|e| format!("cannot run rust-analyzer after installation: {e}"))?;
+    if !verify.status.success() {
+        return Err(format!(
+            "rust-analyzer still fails after installation: {}",
+            error_detail(&verify)
+        ));
+    }
+    Ok(true)
+}
+
+fn error_detail(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let detail = if stderr.trim().is_empty() {
+        stdout.trim()
+    } else {
+        stderr.trim()
+    };
+    if detail.is_empty() {
+        output.status.to_string()
+    } else {
+        detail.to_string()
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn script(path: &std::path::Path, body: &str) {
+        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[test]
+    fn missing_rustup_component_is_installed_and_reprobed() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("installed");
+        let analyzer = dir.path().join("rust-analyzer");
+        let rustup = dir.path().join("rustup");
+        script(
+            &analyzer,
+            &format!(
+                "if [ -f '{}' ]; then echo 'rust-analyzer test'; else echo \"error: Unknown binary 'rust-analyzer' in official toolchain 'test'\" >&2; exit 1; fi",
+                marker.display()
+            ),
+        );
+        script(
+            &rustup,
+            &format!(
+                "[ \"$*\" = 'component add rust-analyzer' ] || exit 2\ntouch '{}'",
+                marker.display()
+            ),
+        );
+
+        let mut install_calls = 0;
+        assert_eq!(
+            ensure_rust_analyzer_available(
+                analyzer.to_str().unwrap(),
+                rustup.to_str().unwrap(),
+                || install_calls += 1,
+            ),
+            Ok(true),
+        );
+        assert_eq!(install_calls, 1);
+        assert!(marker.exists());
+        assert_eq!(
+            ensure_rust_analyzer_available(
+                analyzer.to_str().unwrap(),
+                rustup.to_str().unwrap(),
+                || install_calls += 1,
+            ),
+            Ok(false),
+        );
+        assert_eq!(install_calls, 1);
+    }
+
+    #[test]
+    fn unrelated_analyzer_failure_does_not_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let analyzer = dir.path().join("rust-analyzer");
+        let rustup = dir.path().join("rustup");
+        let marker = dir.path().join("installed");
+        script(&analyzer, "echo 'broken analyzer' >&2; exit 1");
+        script(&rustup, &format!("touch '{}'", marker.display()));
+
+        let result = ensure_rust_analyzer_available(
+            analyzer.to_str().unwrap(),
+            rustup.to_str().unwrap(),
+            || panic!("should not install"),
+        );
+        assert!(result.unwrap_err().contains("broken analyzer"));
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn failed_component_install_reports_rustup_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let analyzer = dir.path().join("rust-analyzer");
+        let rustup = dir.path().join("rustup");
+        script(
+            &analyzer,
+            "echo \"error: Unknown binary 'rust-analyzer' in official toolchain 'test'\" >&2; exit 1",
+        );
+        script(&rustup, "echo 'download failed' >&2; exit 1");
+
+        let mut attempted = false;
+        let result = ensure_rust_analyzer_available(
+            analyzer.to_str().unwrap(),
+            rustup.to_str().unwrap(),
+            || attempted = true,
+        );
+        assert!(attempted);
+        assert!(result.unwrap_err().contains("download failed"));
     }
 }

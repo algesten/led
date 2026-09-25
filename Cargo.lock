@@ -1159,6 +1159,7 @@ dependencies = [
  "led-state-syntax",
  "ropey",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

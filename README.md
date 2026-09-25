@@ -28,7 +28,10 @@ Full LSP integration with out-of-the-box support for:
 | JSON                  | vscode-json-language-server |
 | Bash                  | bash-language-server        |
 
-Language servers are not bundled — install them separately and make sure they are on your `PATH`. led will automatically start the right server when you open a file.
+Language servers are not bundled. Install them and make sure they are on your `PATH`;
+led starts the matching server when you open a file. If the `rust-analyzer`
+command is a rustup proxy whose component is missing, led runs
+`rustup component add rust-analyzer` and retries automatically.
 
 ```
 # Rust

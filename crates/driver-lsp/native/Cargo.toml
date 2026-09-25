@@ -28,3 +28,6 @@ serde_json = { workspace = true }
 # they arrive on `client/registerCapability`. Same crate the
 # runtime uses to match events back against the compiled set.
 globset = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
