@@ -174,7 +174,11 @@ pub fn side_panel_browser<'a>(inputs: SidePanelBrowserInputs<'a>) -> SidePanelMo
     });
     let selected = browser_selected_idx(&entries, browser.selected_path.as_ref());
     let rows = rows as usize;
-    let start = *browser.scroll_offset;
+    // The tree can shrink between navigation and render (for example
+    // after a directory listing or a file-watch update). Keep the
+    // viewport inside the current entries even if its saved offset
+    // belongs to the old tree.
+    let start = (*browser.scroll_offset).min(entries.len().saturating_sub(rows));
     let end = start.saturating_add(rows).min(entries.len());
     let focused = *browser.focus == Focus::Side;
     // Per-file category map — used for both file rows (direct

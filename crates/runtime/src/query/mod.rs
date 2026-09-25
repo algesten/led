@@ -2211,6 +2211,55 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
     }
 
     #[test]
+    fn browser_side_panel_clamps_scroll_after_tree_shrinks() {
+        use imbl::Vector;
+        use led_driver_fs_list_core::{DirEntry, DirEntryKind, FsTree};
+
+        let root = canon("/p");
+        let mut fs = FsTree {
+            root: Some(root.clone()),
+            ..Default::default()
+        };
+        let mut browser = BrowserUi::default();
+        browser.scroll_offset = 20;
+        let tabs = Tabs::default();
+        let edits = BufferEdits::default();
+        let diags = DiagnosticsStates::default();
+        let git = led_state_git::GitState::default();
+        let theme = Theme::default();
+        let render = |fs: &FsTree| {
+            side_panel_browser(SidePanelBrowserInputs {
+                fs: FsTreeInput::new(fs),
+                browser: BrowserUiInput::new(&browser),
+                tabs: TabsActiveInput::new(&tabs),
+                edits: EditedBuffersInput::new(&edits),
+                diagnostics: DiagnosticsStatesInput::new(&diags),
+                git: GitStateInput::new(&git),
+                theme: ThemeInput::new(&theme),
+                rows: 2,
+            })
+        };
+
+        // A refresh can briefly leave the tree empty while the old
+        // viewport still points deep into its previous contents.
+        assert!(render(&fs).rows.is_empty());
+
+        let mut children = Vector::new();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            children.push_back(DirEntry {
+                name: name.into(),
+                path: canon(&format!("/p/{name}")),
+                kind: DirEntryKind::File,
+            });
+        }
+        fs.dir_contents.insert(root, children);
+        let panel = render(&fs);
+        assert_eq!(panel.rows.len(), 2);
+        assert_eq!(&*panel.rows[0].name, "b.txt");
+        assert_eq!(&*panel.rows[1].name, "c.txt");
+    }
+
+    #[test]
     fn lsp_progress_message_persists_server_name_while_idle() {
         // Regression: an idle server with no progress detail
         // must still surface its name. Legacy shows
