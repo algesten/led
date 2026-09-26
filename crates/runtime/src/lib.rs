@@ -148,6 +148,7 @@ pub struct Drivers {
     pub lsp: LspDriver,
     pub git: GitDriver,
     pub session: SessionDriver,
+    pub claude: led_driver_claude_core::ClaudeDriver,
 
     // Held only for lifetime management; detached on drop.
     _file_watch_native: led_driver_file_watch_native::FileWatchNative,
@@ -162,6 +163,7 @@ pub struct Drivers {
     _lsp_native: LspNative,
     _git_native: GitNative,
     _session_native: SessionNative,
+    _claude_native: led_driver_claude_native::ClaudeNative,
 }
 
 /// Allocator for fresh `TabId`s. Counter only; ids are never reused.
@@ -324,6 +326,30 @@ pub struct Sources {
     /// `GitCmd::ScanFiles` (a file save is the most common cause
     /// of git state changing, so rescanning is the right UX).
     pub git_scan_pending: bool,
+    /// Driver-owned source for the Claude driver: per-session
+    /// subprocess lifecycle state. Mutated by `ClaudeDriver::
+    /// process` (folds in events) and `ClaudeDriver::execute`
+    /// (writes intent synchronously before shipping the cmd).
+    pub chat_lifecycle: led_driver_claude_core::ChatLifecycle,
+    /// Driver-owned source for the Claude driver: per-session
+    /// live event log + usage snapshots. Same mutator pattern as
+    /// `chat_lifecycle`.
+    pub chat_transcripts: led_driver_claude_core::ChatTranscripts,
+    /// Driver-owned mirror of the SQLite chat-row + chat-message
+    /// tables. Populated on `SessionEvent::ChatsLoaded` and
+    /// updated optimistically by the claude_phase before SQLite
+    /// writes round-trip.
+    pub chat_store: led_driver_session_core::ChatStore,
+    /// User-decision source: per chat-buffer path → session UUID
+    /// plus the offsets that drive Submit, response splicing, and
+    /// `subprocess_action`. Process-local, not persisted by the
+    /// session driver (reseeded from `Tabs.open` filename shape).
+    pub chat_sessions: led_state_chat::ChatSessions,
+    /// User-decision source: per-session effort / permission-mode
+    /// overrides + the queue of user messages ready to ship to
+    /// the subprocess. Drained one-at-a-time by
+    /// `subprocess_action`.
+    pub chat_prefs: led_state_chat::ChatPrefs,
     /// Whole-process lifecycle: `Phase` state machine plus the
     /// `force_redraw` repaint counter. Driven by the dispatch
     /// outcomes (`Quit` → Exiting, `Suspend` → Suspended → back
@@ -568,6 +594,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         phases::ingest::ingest_session(world.sources, &env);
         phases::ingest::ingest_git(world.sources, &env);
         phases::ingest::ingest_clipboard(world.sources, &env);
+        phases::claude_phase::ingest(world.sources, &env);
         // Drain terminal events + dispatch each. Quit short-circuits
         // back to the next iteration's gate; Suspend handles its
         // alt-screen round-trip inline.
@@ -598,6 +625,9 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
 
         // ── Git dispatch + file-watch event drain ─────────────
         phases::git_dispatch::run(world.sources, &env);
+
+        // ── Claude dispatch (subprocess + persistence + splice) ─
+        phases::claude_phase::execute(world.sources, &env);
 
         // ── Quit gate (Theme E). The Shutdown cmd has already
         // shipped via execute_phase this tick (see
@@ -891,6 +921,10 @@ pub fn spawn_drivers(
         trace.clone().as_session_trace(),
         wake.notifier.clone(),
     );
+    let (claude, claude_native) = led_driver_claude_native::spawn(
+        trace.clone().as_claude_trace(),
+        wake.notifier.clone(),
+    );
     let (file_watch, file_watch_native) = led_driver_file_watch_native::spawn(
         trace.clone().as_file_watch_trace(),
         wake.notifier.clone(),
@@ -914,6 +948,7 @@ pub fn spawn_drivers(
         lsp,
         git,
         session,
+        claude,
         _file_watch_native: file_watch_native,
         _file_native: file_native,
         _file_write_native: file_write_native,
@@ -926,6 +961,7 @@ pub fn spawn_drivers(
         _lsp_native: lsp_native,
         _git_native: git_native,
         _session_native: session_native,
+        _claude_native: claude_native,
     })
 }
 
@@ -956,6 +992,104 @@ pub(crate) mod trace_adapter {
     pub(crate) struct GitTraceAdapter(pub Arc<dyn Trace>);
     pub(crate) struct SessionTraceAdapter(pub Arc<dyn Trace>);
     pub(crate) struct FileWatchTraceAdapter;
+
+    /// Adapter for `driver-claude-core::Trace`. Logs events to the
+    /// file at `$LED_CLAUDE_LOG` when set; otherwise no-op. Mirrors
+    /// the env-var-driven sink approach the legacy bridge used —
+    /// the chat driver doesn't surface through the shared trace
+    /// (`SharedTrace`) because chat tracing has its own intent log
+    /// (a per-session JSONL file), not the structured intent stream.
+    pub(crate) struct ClaudeTraceAdapter;
+
+    impl ClaudeTraceAdapter {
+        fn log_line(line: String) {
+            let Ok(path) = std::env::var("LED_CLAUDE_LOG") else {
+                return;
+            };
+            // Open-and-append; ignore errors — tracing is best-effort.
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                use std::io::Write;
+                let _ = writeln!(f, "{line}");
+            }
+        }
+    }
+
+    impl led_driver_claude_core::Trace for ClaudeTraceAdapter {
+        fn spawn(
+            &self,
+            uuid: &led_core::SessionUuid,
+            mode: led_driver_claude_core::SpawnMode,
+            effort: led_core::Effort,
+            permission_mode: led_core::PermissionMode,
+        ) {
+            Self::log_line(format!(
+                "[claude] spawn uuid={} mode={:?} effort={:?} perm={:?}",
+                uuid.as_str(),
+                mode,
+                effort,
+                permission_mode
+            ));
+        }
+        fn init(&self, uuid: &led_core::SessionUuid, model: &str) {
+            Self::log_line(format!("[claude] init uuid={} model={}", uuid.as_str(), model));
+        }
+        fn user_message(&self, uuid: &led_core::SessionUuid, len_chars: usize) {
+            Self::log_line(format!(
+                "[claude] user uuid={} len={}",
+                uuid.as_str(),
+                len_chars
+            ));
+        }
+        fn assistant_text(&self, uuid: &led_core::SessionUuid, len_chars: usize) {
+            Self::log_line(format!(
+                "[claude] assistant uuid={} len={}",
+                uuid.as_str(),
+                len_chars
+            ));
+        }
+        fn turn_complete(
+            &self,
+            uuid: &led_core::SessionUuid,
+            num_turns: u32,
+            cost_usd: f64,
+        ) {
+            Self::log_line(format!(
+                "[claude] turn_complete uuid={} turns={} cost_usd={}",
+                uuid.as_str(),
+                num_turns,
+                cost_usd
+            ));
+        }
+        fn turn_error(&self, uuid: &led_core::SessionUuid, errors: &[String]) {
+            Self::log_line(format!(
+                "[claude] turn_error uuid={} errors={:?}",
+                uuid.as_str(),
+                errors
+            ));
+        }
+        fn session_not_found(&self, uuid: &led_core::SessionUuid) {
+            Self::log_line(format!("[claude] session_not_found uuid={}", uuid.as_str()));
+        }
+        fn exited(
+            &self,
+            uuid: &led_core::SessionUuid,
+            exit: led_driver_claude_core::ExitInfo,
+        ) {
+            Self::log_line(format!(
+                "[claude] exited uuid={} code={:?} signal={:?}",
+                uuid.as_str(),
+                exit.code,
+                exit.signal
+            ));
+        }
+        fn stderr(&self, uuid: &led_core::SessionUuid, line: &str) {
+            Self::log_line(format!("[claude] stderr uuid={} line={}", uuid.as_str(), line));
+        }
+    }
 
     impl led_driver_buffers_core::Trace for FileTraceAdapter {
         fn file_load_start(&self, path: &CanonPath) {
@@ -1218,6 +1352,9 @@ impl SharedTrace {
     }
     pub(crate) fn as_session_trace(&self) -> Arc<dyn led_driver_session_core::Trace> {
         Arc::new(trace_adapter::SessionTraceAdapter(self.inner()))
+    }
+    pub(crate) fn as_claude_trace(&self) -> Arc<dyn led_driver_claude_core::Trace> {
+        Arc::new(trace_adapter::ClaudeTraceAdapter)
     }
 }
 

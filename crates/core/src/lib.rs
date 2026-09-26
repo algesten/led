@@ -9,6 +9,7 @@
 //! - [`UserPath`] / [`CanonPath`] — path newtypes mirroring legacy led's
 //!   user-vs-canonical split
 
+pub mod claude_opts;
 pub mod content_hash;
 pub mod git;
 pub mod ids;
@@ -25,10 +26,11 @@ pub mod sub_line;
 #[doc(hidden)]
 pub use drv;
 
+pub use claude_opts::{Effort, PermissionMode};
 pub use content_hash::{EphemeralContentHash, PersistedContentHash};
 pub use ids::{
     BufferStateSum, BufferVersion, ChainId, EditSeq, LspRequestSeq, SavedVersion, ServerId,
-    UndoDbSeq, WatchSeq,
+    SessionUuid, UndoDbSeq, WatchSeq,
 };
 pub use issue::{CategoryInfo, IssueCategory};
 pub use notify::Notifier;

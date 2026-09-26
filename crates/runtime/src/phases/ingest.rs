@@ -732,6 +732,7 @@ pub(crate) fn ingest_session(sources: &mut Sources, env: &TickEnv<'_>) {
         path_chains,
         session,
         session_driver,
+        chat_store,
         undo_persistence,
         resume_check_pending,
         lifecycle,
@@ -808,6 +809,9 @@ pub(crate) fn ingest_session(sources: &mut Sources, env: &TickEnv<'_>) {
             }
             SessionEvent::SyncResult { kind } => {
                 apply_sync_result(kind, edits, undo_persistence, file_watch);
+            }
+            SessionEvent::ChatsLoaded { rows, messages } => {
+                chat_store.apply_loaded(rows, messages);
             }
         }
     }

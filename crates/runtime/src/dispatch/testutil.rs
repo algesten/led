@@ -126,6 +126,8 @@ pub(super) fn dispatch_default(
 ) -> DispatchOutcome {
     let mut chord = ChordState::default();
     let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
+    let mut chat_sessions = led_state_chat::ChatSessions::default();
+    let mut chat_prefs = led_state_chat::ChatPrefs::default();
     let mut kill_ring = KillRing::default();
     let mut clip = ClipboardIntent::default();
     let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
@@ -173,6 +175,8 @@ pub(super) fn dispatch_default(
         keymap: &keymap,
         chord: &mut chord,
         kbd_macro: &mut kbd_macro,
+        chat_sessions: &mut chat_sessions,
+        chat_prefs: &mut chat_prefs,
         syntax: &syntax,
         clock: &clock,
     };
@@ -193,6 +197,8 @@ pub(super) fn dispatch_chord_default(
     let keymap = default_keymap();
     let mut chord = ChordState::default();
     let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
+    let mut chat_sessions = led_state_chat::ChatSessions::default();
+    let mut chat_prefs = led_state_chat::ChatPrefs::default();
     let mut kill_ring = KillRing::default();
     let mut clip = ClipboardIntent::default();
     let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
@@ -239,6 +245,8 @@ pub(super) fn dispatch_chord_default(
         keymap: &keymap,
         chord: &mut chord,
         kbd_macro: &mut kbd_macro,
+        chat_sessions: &mut chat_sessions,
+        chat_prefs: &mut chat_prefs,
         syntax: &syntax,
         clock: &clock,
     };
@@ -259,6 +267,8 @@ pub(super) fn dispatch_with_ring(
 ) -> DispatchOutcome {
     let mut chord = ChordState::default();
     let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
+    let mut chat_sessions = led_state_chat::ChatSessions::default();
+    let mut chat_prefs = led_state_chat::ChatPrefs::default();
     let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
     let mut alerts = AlertState::default();
     let mut jumps = JumpListState::default();
@@ -304,6 +314,8 @@ pub(super) fn dispatch_with_ring(
         keymap: &keymap,
         chord: &mut chord,
         kbd_macro: &mut kbd_macro,
+        chat_sessions: &mut chat_sessions,
+        chat_prefs: &mut chat_prefs,
         syntax: &syntax,
         clock: &clock,
     };
@@ -326,6 +338,8 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
     let keymap = default_keymap();
     let mut chord = ChordState::default();
     let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
+    let mut chat_sessions = led_state_chat::ChatSessions::default();
+    let mut chat_prefs = led_state_chat::ChatPrefs::default();
     let mut find_file: Option<FindFileState> = None;
     let mut isearch: Option<IsearchState> = None;
     let mut file_search: Option<FileSearchState> = None;
@@ -365,6 +379,8 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
         keymap: &keymap,
         chord: &mut chord,
         kbd_macro: &mut kbd_macro,
+        chat_sessions: &mut chat_sessions,
+        chat_prefs: &mut chat_prefs,
         syntax: &syntax,
         clock: &clock,
     };
@@ -409,6 +425,8 @@ pub(super) struct MacroDispatcherFixture {
     keymap: crate::keymap::Keymap,
     pub syntax: led_state_syntax::SyntaxStates,
     pub clock: crate::Clock,
+    chat_sessions: led_state_chat::ChatSessions,
+    chat_prefs: led_state_chat::ChatPrefs,
 }
 
 impl MacroDispatcherFixture {
@@ -449,6 +467,8 @@ impl MacroDispatcherFixture {
             keymap: default_keymap(),
             syntax: led_state_syntax::SyntaxStates::default(),
             clock: crate::Clock::default(),
+            chat_sessions: led_state_chat::ChatSessions::default(),
+            chat_prefs: led_state_chat::ChatPrefs::default(),
         }
     }
 
@@ -479,6 +499,8 @@ impl MacroDispatcherFixture {
             keymap: &self.keymap,
             chord: &mut self.chord,
             kbd_macro: &mut self.kbd_macro,
+            chat_sessions: &mut self.chat_sessions,
+            chat_prefs: &mut self.chat_prefs,
             syntax: &self.syntax,
             clock: &self.clock,
         };

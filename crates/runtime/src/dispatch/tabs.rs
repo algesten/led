@@ -221,6 +221,8 @@ mod tests {
         let fs = FsTree::default();
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
+        let mut chat_sessions = led_state_chat::ChatSessions::default();
+        let mut chat_prefs = led_state_chat::ChatPrefs::default();
         let keymap = default_keymap();
 
         let mut path_chains = std::collections::HashMap::new();
@@ -263,6 +265,8 @@ mod tests {
                 keymap: &keymap,
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
+                chat_sessions: &mut chat_sessions,
+                chat_prefs: &mut chat_prefs,
                 syntax: &syntax,
                 clock: &clock,
             };
@@ -289,6 +293,8 @@ mod tests {
         let fs = FsTree::default();
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
+        let mut chat_sessions = led_state_chat::ChatSessions::default();
+        let mut chat_prefs = led_state_chat::ChatPrefs::default();
         let keymap = default_keymap();
 
         let mut find_file: Option<FindFileState> = None;
@@ -331,6 +337,8 @@ mod tests {
                 keymap: &keymap,
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
+                chat_sessions: &mut chat_sessions,
+                chat_prefs: &mut chat_prefs,
                 syntax: &syntax,
                 clock: &clock,
             };
@@ -359,6 +367,8 @@ mod tests {
         let fs = FsTree::default();
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
+        let mut chat_sessions = led_state_chat::ChatSessions::default();
+        let mut chat_prefs = led_state_chat::ChatPrefs::default();
         let keymap = default_keymap();
 
         let mut find_file: Option<FindFileState> = None;
@@ -401,6 +411,8 @@ mod tests {
                 keymap: &keymap,
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
+                chat_sessions: &mut chat_sessions,
+                chat_prefs: &mut chat_prefs,
                 syntax: &syntax,
                 clock: &clock,
             };
@@ -425,6 +437,8 @@ mod tests {
         let fs = FsTree::default();
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
+        let mut chat_sessions = led_state_chat::ChatSessions::default();
+        let mut chat_prefs = led_state_chat::ChatPrefs::default();
         let keymap = default_keymap();
 
         let mut find_file: Option<FindFileState> = None;
@@ -467,6 +481,8 @@ mod tests {
                 keymap: &keymap,
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
+                chat_sessions: &mut chat_sessions,
+                chat_prefs: &mut chat_prefs,
                 syntax: &syntax,
                 clock: &clock,
             };
@@ -501,6 +517,8 @@ mod tests {
         let fs = FsTree::default();
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
+        let mut chat_sessions = led_state_chat::ChatSessions::default();
+        let mut chat_prefs = led_state_chat::ChatPrefs::default();
         let keymap = default_keymap();
 
         let mut find_file: Option<FindFileState> = None;
@@ -543,6 +561,8 @@ mod tests {
                 keymap: &keymap,
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
+                chat_sessions: &mut chat_sessions,
+                chat_prefs: &mut chat_prefs,
                 syntax: &syntax,
                 clock: &clock,
             };
@@ -575,6 +595,8 @@ mod tests {
         let fs = FsTree::default();
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
+        let mut chat_sessions = led_state_chat::ChatSessions::default();
+        let mut chat_prefs = led_state_chat::ChatPrefs::default();
         let keymap = default_keymap();
 
         let mut find_file: Option<FindFileState> = None;
@@ -617,6 +639,8 @@ mod tests {
                 keymap: &keymap,
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
+                chat_sessions: &mut chat_sessions,
+                chat_prefs: &mut chat_prefs,
                 syntax: &syntax,
                 clock: &clock,
             };

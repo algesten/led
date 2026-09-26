@@ -62,6 +62,9 @@ led-driver-session-native = { workspace = true }
 led-driver-file-watch-core = { workspace = true }
 led-driver-file-watch-native = { workspace = true }
 led-text-layout = { workspace = true }
+led-driver-claude-core = { workspace = true }
+led-driver-claude-native = { workspace = true }
+led-state-chat = { workspace = true }
 led-text-reflow = { workspace = true }
 drv = { workspace = true }
 imbl = { workspace = true }

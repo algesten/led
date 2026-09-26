@@ -11,13 +11,19 @@
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 
-use led_core::{CanonPath, ChainId, PersistedContentHash, UndoDbSeq};
+use led_core::{CanonPath, ChainId, PersistedContentHash, SessionUuid, UndoDbSeq};
 use led_state_buffer_edits::EditGroup;
 
 pub mod session_state;
 
 pub use session_state::{
     DraftSession, PersistedSession, SessionBuffer, SessionData, SessionState, UndoRestoreData,
+};
+
+pub mod chat;
+
+pub use chat::{
+    ChatMessageKind, ChatMessageRow, ChatRole, ChatRow, ChatStatus, ChatStore,
 };
 
 #[derive(Debug, Clone)]
@@ -67,6 +73,40 @@ pub enum SessionCmd {
         last_seen_seq: UndoDbSeq,
         current_chain_id: ChainId,
     },
+
+    // ── Claude chat persistence ────────────────────────────────
+    //
+    // Cmds emitted by the runtime's `pending_persist_writes`
+    // memo as it diffs `ChatTranscripts` (live) against
+    // `ChatStore` (persisted). Write-through: no ack event for
+    // success, errors propagate via `Failed`.
+
+    /// Insert a fresh `claude_sessions` row. Fired once per
+    /// session lifetime, on the first transcript event for a
+    /// previously-unknown session.
+    InsertChatRow { row: ChatRow },
+    /// Append one `claude_messages` row for `session`. `seq`
+    /// must be `ChatStore::max_seq(session) + 1`.
+    AppendChatMessage { message: ChatMessageRow },
+    /// Update the `short_label` / `long_summary` columns after
+    /// the auto-label query lands. Either field can be `None`
+    /// to clear.
+    UpdateChatLabels {
+        id: SessionUuid,
+        short_label: Option<String>,
+        long_summary: Option<String>,
+    },
+    /// Bump `last_active_at` and optionally refresh
+    /// `last_usage_json`. Called once per turn.
+    UpdateChatLastActive {
+        id: SessionUuid,
+        at: i64,
+        usage_json: Option<String>,
+    },
+    /// Mark a session `active` or `orphaned`. Orphaned means
+    /// the CLI's transcript for this id is gone — led keeps
+    /// the row for the picker but won't try to respawn.
+    UpdateChatStatus { id: SessionUuid, status: ChatStatus },
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +134,14 @@ pub enum SessionEvent {
     /// Result of a [`SessionCmd::CheckSync`] probe. Carries one
     /// of three discriminants (M26).
     SyncResult { kind: SyncResultKind },
+    /// Bulk-load of all chat rows + messages for the active
+    /// workspace. Fired once on `SessionCmd::Init`, after the
+    /// regular `Restored` event. The runtime folds these into
+    /// `ChatStore::apply_loaded`.
+    ChatsLoaded {
+        rows: Vec<ChatRow>,
+        messages: Vec<ChatMessageRow>,
+    },
 }
 
 /// Discriminant for [`SessionEvent::SyncResult`]. The runtime
@@ -246,6 +294,16 @@ impl SessionDriver {
                 SessionCmd::Shutdown => {
                     state.shutdown_in_flight = true;
                 }
+                // Chat persistence cmds are write-through with no
+                // per-cmd trace hook (yet) — the SQLite writes are
+                // small and their effects are visible on
+                // `ChatStore` immediately via the optimistic
+                // mirror the runtime applies before dispatch.
+                SessionCmd::InsertChatRow { .. }
+                | SessionCmd::AppendChatMessage { .. }
+                | SessionCmd::UpdateChatLabels { .. }
+                | SessionCmd::UpdateChatLastActive { .. }
+                | SessionCmd::UpdateChatStatus { .. } => {}
             }
             if self.tx.send(cmd.clone()).is_err() {
                 return;
@@ -291,6 +349,11 @@ impl SessionDriver {
                         state.check_sync_in_flight.remove(path);
                     }
                 },
+                SessionEvent::ChatsLoaded { .. } => {
+                    // Folded into ChatStore by the chat ingest
+                    // arm in the runtime. No flight state to
+                    // clear here.
+                }
             }
             out.push(ev);
         }

@@ -91,6 +91,8 @@ pub(crate) fn run(sources: &Sources, env: &TickEnv<'_>) -> QueryOut {
         path_chains,
         undo_persistence,
         lifecycle,
+        chat_sessions,
+        chat_store,
         ..
     } = sources;
 
@@ -212,6 +214,16 @@ pub(crate) fn run(sources: &Sources, env: &TickEnv<'_>) -> QueryOut {
     // cmd by then.
     let shutdown_cmd = desired_shutdown(lifecycle.phase, session);
 
+    // ── Chat overlays on top of the painted frame ──────────────
+    // Both passes are no-ops when the active tab isn't a chat
+    // (and the labels pass also bails when there are no chat
+    // tabs anywhere). Done after `render_frame` so they overlay
+    // the painter's output without forcing the painter to know
+    // about chat sources.
+    let mut frame = frame;
+    apply_chat_gutter_overlay(&mut frame, tabs, edits, chat_sessions);
+    apply_chat_tab_labels(&mut frame, tabs, chat_sessions, chat_store);
+
     QueryOut {
         load_actions,
         save_actions,
@@ -259,6 +271,94 @@ fn desired_shutdown(
 /// Order follows `edits.buffers`' iteration order — stable per
 /// tick. The LSP driver de-duplicates per path inside its own
 /// state machine, so emit order is not observable from goldens.
+/// Stamp the "unstaged" gutter category onto every visible row at or
+/// past the active chat tab's `submit_offset`. Mirrors how git
+/// unstaged hunks render — a visual reminder that the text below
+/// the marker hasn't been submitted yet.
+///
+/// No-op when the active tab isn't a chat, when the chat-session
+/// metadata is missing, or when the user has yet to type anything
+/// past `submit_offset`. Tilde (`~`) rows (the painter's "past
+/// end-of-rope" filler) are explicitly skipped — they aren't part
+/// of the rope.
+fn apply_chat_gutter_overlay(
+    frame: &mut Option<led_driver_terminal_core::Frame>,
+    tabs: &led_state_tabs::Tabs,
+    edits: &led_state_buffer_edits::BufferEdits,
+    chat_sessions: &led_state_chat::ChatSessions,
+) {
+    let Some(f) = frame.as_mut() else { return };
+    let Some(active_id) = tabs.active else { return };
+    let Some(tab) = tabs.open.iter().find(|t| t.id == active_id) else {
+        return;
+    };
+    let Some(state) = chat_sessions.get(&tab.path) else {
+        return;
+    };
+    let Some(eb) = edits.buffers.get(&tab.path) else {
+        return;
+    };
+    let led_driver_terminal_core::BodyModel::Content { lines, .. } = &mut f.body else {
+        return;
+    };
+    let rope = &eb.draft;
+    let rope_len = rope.len_chars();
+    if state.submit_offset >= rope_len {
+        return;
+    }
+    let submit_line = rope.char_to_line(state.submit_offset);
+    let scroll_top = tab.scroll.top;
+    let lines_mut = std::sync::Arc::make_mut(lines);
+    for (visual_row, body_line) in lines_mut.iter_mut().enumerate() {
+        if body_line.text.trim_start().starts_with('~') {
+            continue;
+        }
+        let physical_line = scroll_top + visual_row;
+        if physical_line >= submit_line {
+            body_line.gutter_category = Some(led_core::IssueCategory::Unstaged);
+        }
+    }
+}
+
+/// Rewrite tab-strip labels for every chat-buffer tab so they read
+/// `#<short_label>` (or `#chat:<8-char-prefix>` when no label is
+/// known yet). Preserves the order of `tab_bar.labels` so the
+/// painter's per-tab geometry stays valid.
+fn apply_chat_tab_labels(
+    frame: &mut Option<led_driver_terminal_core::Frame>,
+    tabs: &led_state_tabs::Tabs,
+    chat_sessions: &led_state_chat::ChatSessions,
+    chat_store: &led_driver_session_core::ChatStore,
+) {
+    let Some(f) = frame.as_mut() else { return };
+    if chat_sessions.by_path.is_empty() {
+        return;
+    }
+    let mut labels: Vec<String> = (*f.tab_bar.labels).clone();
+    for (i, tab) in tabs.open.iter().enumerate() {
+        let Some(state) = chat_sessions.get(&tab.path) else {
+            continue;
+        };
+        let Some(slot) = labels.get_mut(i) else {
+            continue;
+        };
+        let short = chat_store
+            .rows
+            .get(&state.session)
+            .and_then(|r| r.short_label.clone())
+            .unwrap_or_else(|| {
+                let prefix: String = state.session.as_str().chars().take(8).collect();
+                format!("chat:{prefix}")
+            });
+        let mut s = String::with_capacity(short.len() + 2);
+        s.push(' ');
+        s.push('#');
+        s.push_str(&short);
+        *slot = s;
+    }
+    f.tab_bar.labels = std::sync::Arc::new(labels);
+}
+
 fn derive_buffer_opened(
     edits: &led_state_buffer_edits::BufferEdits,
     lsp_notified: &imbl::HashMap<led_core::CanonPath, crate::LspNotified>,
